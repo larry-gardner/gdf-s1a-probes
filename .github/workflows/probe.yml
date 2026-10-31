@@ -1,0 +1,293 @@
+name: s1a-probe
+run-name: "s1a ${{ inputs.probe }} ${{ inputs.nonce }}"
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: Probe id
+        required: true
+        type: choice
+        options: [r1, r2, r3, r4, r6-cancel, r6-ignore, r6-timeout, r7-clean, r7-plant, r7-encoded, r8, r9-r13]
+      nonce:
+        description: 32 lowercase hex characters, unique per dispatch
+        required: true
+        type: string
+      pr:
+        description: PR number for the R2 approval probe
+        required: false
+        type: string
+        default: ""
+permissions: {}
+env:
+  CLAUDE_VERSION: "2.1.316"
+  CLAUDE_SHA512: "sha512-RQDM6N285IjNKcmlPRriayNzpTkEJreAw5/vBU+V0R3qljkQ5z6/pSbzcVUAXvasoOlvub0RIma3NWvSuZA8Cg=="
+  CODEX_VERSION: "0.166.0"
+  CODEX_SHA512: "sha512-CxDm3+D1cpbGJeHrdzINoG+3wn9BVncP4qpZaaNYkxe8iPtRJOYyCJnnPoVjWRIBvI9vPKbRoifsMSA5xDaUpw=="
+  DISABLE_UPDATES: "1"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Validate inputs
+        env:
+          NONCE: ${{ inputs.nonce }}
+          PR: ${{ inputs.pr }}
+        run: |
+          [[ "$NONCE" =~ ^[0-9a-f]{32}$ ]] || { echo "::error::bad nonce"; exit 1; }
+          [[ -z "$PR" || "$PR" =~ ^[0-9]{1,6}$ ]] || { echo "::error::bad pr"; exit 1; }
+
+  r1:
+    needs: guard
+    if: inputs.probe == 'r1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash ci/install-clis.sh
+      - name: Versions and help, with no credential and no configuration
+        run: |
+          mkdir -p out "$RUNNER_TEMP/h/.codex"
+          bare() { env -i HOME="$RUNNER_TEMP/h" CODEX_HOME="$RUNNER_TEMP/h/.codex" PATH=/usr/bin:/bin DISABLE_UPDATES=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 "$@"; }
+          bare "$CLAUDE_BIN" --version > out/claude-version.txt
+          bare "$CLAUDE_BIN" --help > out/claude-help.txt
+          bare "$CODEX_BIN" --version > out/codex-version.txt
+          bare "$CODEX_BIN" --help > out/codex-help.txt
+          bare "$CODEX_BIN" exec --help > out/codex-exec-help.txt
+          sha256sum "$CLAUDE_BIN" "$CODEX_BIN" > out/binary-sha256.txt
+          cp /etc/os-release out/os-release.txt
+          echo "${ImageVersion:-unknown}" > out/image-version.txt
+          for f in --max-turns --restricted --permission-prompts --no-session-persistence --json-schema --bare; do
+            if grep -q -- "$f" out/claude-help.txt; then echo "claude $f listed"; else echo "claude $f NOT listed"; fi
+          done | tee out/claude-flags.txt
+          for f in --skip-git-repo-check --output-schema --json --sandbox --ephemeral --ignore-user-config; do
+            if grep -q -- "$f" out/codex-exec-help.txt; then echo "codex exec $f listed"; else echo "codex exec $f NOT listed"; fi
+          done | tee out/codex-flags.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r1-${{ inputs.nonce }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
+
+  r2-deny:
+    needs: guard
+    if: inputs.probe == 'r2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: A token with no permissions attempts writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NONCE: ${{ inputs.nonce }}
+          SHA: ${{ github.sha }}
+        run: |
+          api() { curl -s -o "$RUNNER_TEMP/body-$1.json" -w '%{http_code}' -X "$2" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "https://api.github.com/repos/$REPO/$3" -d "$4"; }
+          ref=$(api ref POST git/refs "{\"ref\":\"refs/heads/gdf/r2-deny-$NONCE\",\"sha\":\"$SHA\"}")
+          pr=$(api pr POST pulls "{\"title\":\"r2\",\"head\":\"gdf/r2-seed-b-$NONCE\",\"base\":\"main\"}")
+          disp=$(api disp POST actions/workflows/probe.yml/dispatches '{"ref":"main","inputs":{"probe":"r8","nonce":"ffffffffffffffffffffffffffffffff"}}')
+          issue=$(api issue POST issues '{"title":"r2"}')
+          echo "create_ref=$ref create_pr=$pr dispatch=$disp create_issue=$issue"
+          for c in $ref $pr $disp $issue; do case "$c" in 2*) echo "::error::write allowed ($c)"; exit 1;; esac; done
+
+  r2-control:
+    needs: guard
+    if: inputs.probe == 'r2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: The same calls with write permissions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NONCE: ${{ inputs.nonce }}
+          SHA: ${{ github.sha }}
+          PR: ${{ inputs.pr }}
+        run: |
+          api() { curl -s -o "$RUNNER_TEMP/body-$1.json" -w '%{http_code}' -X "$2" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "https://api.github.com/repos/$REPO/$3" -d "$4"; }
+          ref=$(api ref POST git/refs "{\"ref\":\"refs/heads/gdf/r2-control-$NONCE\",\"sha\":\"$SHA\"}")
+          pr=$(api pr POST pulls "{\"title\":\"r2 control\",\"head\":\"gdf/r2-seed-b-$NONCE\",\"base\":\"main\"}")
+          approve=$(api approve POST "pulls/$PR/reviews" '{"event":"APPROVE"}')
+          echo "create_ref=$ref create_pr=$pr approve=$approve"
+          echo "pr_message=$(grep -o '"message": *"[^"]*"' "$RUNNER_TEMP/body-pr.json" | head -n 1)"
+          echo "approve_message=$(grep -o '"message": *"[^"]*"' "$RUNNER_TEMP/body-approve.json" | head -n 1)"
+          case "$ref" in 2*) ;; *) echo "::error::positive control failed ($ref)"; exit 1;; esac
+          for c in $pr $approve; do case "$c" in 2*) echo "::error::Actions created or approved a PR ($c)"; exit 1;; esac; done
+
+  r3-env:
+    needs: guard
+    if: inputs.probe == 'r3'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: gdf-agents
+    steps:
+      - name: Canary presence, by hash only
+        env:
+          CANARY: ${{ secrets.GDF_CANARY }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ -n "$CANARY" ]; then echo "ref=$REF canary=present sha256=$(printf '%s' "$CANARY" | sha256sum | cut -c1-64)"; else echo "ref=$REF canary=absent"; fi
+
+  r4:
+    needs: guard
+    if: inputs.probe == 'r4'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: A random 1 MiB file
+        run: mkdir out && head -c 1048576 /dev/urandom > out/blob.bin && sha256sum out/blob.bin | tee out/blob.sha256
+      - id: up
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r4-${{ inputs.nonce }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+      - name: What the upload reported
+        env:
+          ID: ${{ steps.up.outputs.artifact-id }}
+          DIGEST: ${{ steps.up.outputs.artifact-digest }}
+        run: echo "artifact_id=$ID artifact_digest=$DIGEST"
+
+  r6:
+    needs: guard
+    if: startsWith(inputs.probe, 'r6-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.probe == 'r6-timeout' && 2 || 15 }}
+    steps:
+      - name: Sleep, ignoring signals in the r6-ignore variant
+        env:
+          VARIANT: ${{ inputs.probe }}
+        run: |
+          date -u +%FT%TZ
+          if [ "$VARIANT" = r6-ignore ]; then trap '' INT TERM HUP; fi
+          while :; do sleep 1; done
+
+  r7:
+    needs: guard
+    if: startsWith(inputs.probe, 'r7-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: gdf-agents
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Simulated agent output
+        env:
+          CANARY: ${{ secrets.GDF_CANARY }}
+          VARIANT: ${{ inputs.probe }}
+        run: |
+          mkdir -p out && cp toy/calc.py out/
+          case "$VARIANT" in
+            r7-plant) printf 'leak %s\n' "$CANARY" > out/leak.txt ;;
+            r7-encoded) printf '%s' "$CANARY" | base64 -w0 > out/leak.b64 ;;
+          esac
+          echo "masking probe, literal: $CANARY"
+          echo "masking probe, encoded: $(printf '%s' "$CANARY" | base64 -w0)"
+      - name: Trusted scan before upload
+        env:
+          CANARY: ${{ secrets.GDF_CANARY }}
+        run: |
+          if grep -rFq -- "$CANARY" out; then echo "::error::canary found in outputs"; exit 1; fi
+          echo "scan clean"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r7-${{ inputs.nonce }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  r8:
+    needs: guard
+    if: inputs.probe == 'r8'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: gdf-agents
+    steps:
+      - name: Record environ, egress and sudo
+        env:
+          CANARY: ${{ secrets.GDF_CANARY }}
+        run: |
+          echo "environ_has_canary=$(tr '\0' '\n' < /proc/self/environ | grep -c '^CANARY=GDFCANARY' || true)"
+          echo "https_example=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://example.com || true)"
+          echo "https_pypi=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://pypi.org/simple/ || true)"
+          if sudo -n true; then echo "sudo=yes"; else echo "sudo=no"; fi
+          id
+
+  r9-r13:
+    needs: guard
+    if: inputs.probe == 'r9-r13'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: gdf-agents
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash ci/install-clis.sh
+      - name: R13 positive control, sudo and Docker work before the drop
+        run: |
+          sudo -n true
+          echo "sudo_before=yes"
+          docker info > /dev/null
+          echo "docker_before=usable"
+      - name: R9a before, with Ubuntu's AppArmor gate in place
+        run: |
+          mkdir -p "$RUNNER_TEMP/r9a"
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          command -v bwrap || echo "bwrap=absent"
+          set +e
+          env -i HOME="$RUNNER_TEMP/r9a" CODEX_HOME="$RUNNER_TEMP/r9a" PATH=/usr/bin:/bin "$CODEX_BIN" sandbox -- /usr/bin/true
+          echo "r9a_before_exit=$?"
+      - name: R9a relax the AppArmor gate
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: R13 drop sudo
+        run: bash ci/drop-sudo.sh
+      - name: R13 verify, in a new step process
+        run: |
+          if sudo -n true 2> "$RUNNER_TEMP/r13-sudo.err"; then echo "::error::sudo still works"; exit 1; fi
+          sudo_err="$(head -c 300 "$RUNNER_TEMP/r13-sudo.err")"
+          echo "sudo_refusal=$sudo_err"
+          [ "$(stat -c '%u %A' /usr/bin/sudo)" = "0 -rwsr-xr-x" ] || { echo "::error::sudo is not setuid root, so its failure proves nothing"; exit 1; }
+          case "$sudo_err" in *"a password is required"*|*"not in the sudoers"*|*"may not run sudo"*) ;; *) echo "::error::sudo failed for an unexpected reason"; exit 1;; esac
+          grep -qx /run/docker.sock "$RUNNER_TEMP/r13-sockets.txt" || { echo "::error::the socket scan did not find the Docker socket"; exit 1; }
+          while IFS= read -r sock; do
+            if [ -w "$sock" ]; then echo "::error::socket still writable: $sock"; exit 1; fi
+          done < "$RUNNER_TEMP/r13-sockets.txt"
+          if docker info > /dev/null 2>&1; then echo "::error::docker still usable"; exit 1; fi
+          echo "sockets_closed=$(grep -c . "$RUNNER_TEMP/r13-sockets.txt")"
+          id
+          echo "sudo_after=no"
+      - name: R9a after
+        run: |
+          mkdir -p "$RUNNER_TEMP/r9a2"
+          env -i HOME="$RUNNER_TEMP/r9a2" CODEX_HOME="$RUNNER_TEMP/r9a2" PATH=/usr/bin:/bin "$CODEX_BIN" sandbox -- /usr/bin/true
+          echo "r9a_after_exit=0"
+      - name: R9b positive controls outside the sandbox, then negatives inside
+        env:
+          CANARY: ${{ secrets.GDF_CANARY }}
+        run: |
+          set -u
+          h="$RUNNER_TEMP/r9b-home"; mkdir -p "$h/.codex"
+          fake="$h/.codex/auth.json"
+          printf '{"OPENAI_API_KEY":"%s"}\n' "$CANARY" > "$fake"
+          env -i GDFHOLD="$CANARY" sleep 600 &
+          holder=$!
+          echo "--- outside"
+          bash ci/r9b-inside.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$GITHUB_ENV" "$holder" "$fake" | tee "$RUNNER_TEMP/r9b-outside.txt"
+          echo "--- inside: read-only, inherit=none, ignore_default_excludes=false"
+          env -i HOME="$h" CODEX_HOME="$h/.codex" PATH=/usr/bin:/bin CODEX_API_KEY="$CANARY" \
+            "$CODEX_BIN" -c 'shell_environment_policy.inherit="none"' -c 'shell_environment_policy.ignore_default_excludes=false' \
+            sandbox -- /bin/bash "$GITHUB_WORKSPACE/ci/r9b-inside.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$GITHUB_ENV" "$holder" "$fake" \
+            | tee "$RUNNER_TEMP/r9b-inside.txt"
+          kill "$holder" || true
+          python3 -I ci/r9b-judge.py "$RUNNER_TEMP/r9b-outside.txt" "$RUNNER_TEMP/r9b-inside.txt"
