@@ -88,11 +88,13 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           api() { curl -s -o "$RUNNER_TEMP/body-$1.json" -w '%{http_code}' -X "$2" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "https://api.github.com/repos/$REPO/$3" -d "$4"; }
+          diag() { jq -c -n 'input | {message: ((.message // "") | tostring | .[0:300]), errors: [(.errors // [])[]? | if type == "string" then .[0:300] elif type == "object" then {resource: ((.resource // "") | tostring | .[0:100]), field: ((.field // "") | tostring | .[0:100]), code: ((.code // "") | tostring | .[0:100]), message: ((.message // "") | tostring | .[0:300])} else tostring | .[0:300] end][0:5], documentation_url: ((.documentation_url // "") | tostring | .[0:200])}' "$RUNNER_TEMP/body-$1.json" 2>/dev/null || echo '"no body"'; }
           ref=$(api ref POST git/refs "{\"ref\":\"refs/heads/gdf/r2-deny-$NONCE\",\"sha\":\"$SHA\"}")
           pr=$(api pr POST pulls "{\"title\":\"r2\",\"head\":\"gdf/r2-seed-b-$NONCE\",\"base\":\"main\"}")
           disp=$(api disp POST actions/workflows/probe.yml/dispatches '{"ref":"main","inputs":{"probe":"r8","nonce":"ffffffffffffffffffffffffffffffff"}}')
           issue=$(api issue POST issues '{"title":"r2"}')
           echo "create_ref=$ref create_pr=$pr dispatch=$disp create_issue=$issue"
+          for c in ref pr disp issue; do echo "deny_${c}_body=$(diag "$c")"; done
           for c in $ref $pr $disp $issue; do case "$c" in 2*) echo "::error::write allowed ($c)"; exit 1;; esac; done
 
   r2-control:
@@ -113,12 +115,14 @@ jobs:
           PR: ${{ inputs.pr }}
         run: |
           api() { curl -s -o "$RUNNER_TEMP/body-$1.json" -w '%{http_code}' -X "$2" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "https://api.github.com/repos/$REPO/$3" -d "$4"; }
+          diag() { jq -c -n 'input | {message: ((.message // "") | tostring | .[0:300]), errors: [(.errors // [])[]? | if type == "string" then .[0:300] elif type == "object" then {resource: ((.resource // "") | tostring | .[0:100]), field: ((.field // "") | tostring | .[0:100]), code: ((.code // "") | tostring | .[0:100]), message: ((.message // "") | tostring | .[0:300])} else tostring | .[0:300] end][0:5], documentation_url: ((.documentation_url // "") | tostring | .[0:200])}' "$RUNNER_TEMP/body-$1.json" 2>/dev/null || echo '"no body"'; }
           ref=$(api ref POST git/refs "{\"ref\":\"refs/heads/gdf/r2-control-$NONCE\",\"sha\":\"$SHA\"}")
           pr=$(api pr POST pulls "{\"title\":\"r2 control\",\"head\":\"gdf/r2-seed-b-$NONCE\",\"base\":\"main\"}")
+          comment=$(api comment POST "pulls/$PR/reviews" '{"event":"COMMENT","body":"r2 control: a comment review, which the job token may post"}')
           approve=$(api approve POST "pulls/$PR/reviews" '{"event":"APPROVE"}')
-          echo "create_ref=$ref create_pr=$pr approve=$approve"
-          echo "pr_message=$(grep -o '"message": *"[^"]*"' "$RUNNER_TEMP/body-pr.json" | head -n 1)"
-          echo "approve_message=$(grep -o '"message": *"[^"]*"' "$RUNNER_TEMP/body-approve.json" | head -n 1)"
+          echo "create_ref=$ref create_pr=$pr comment=$comment approve=$approve"
+          echo "pr_body=$(diag pr)"
+          echo "approve_body=$(diag approve)"
           case "$ref" in 2*) ;; *) echo "::error::positive control failed ($ref)"; exit 1;; esac
           for c in $pr $approve; do case "$c" in 2*) echo "::error::Actions created or approved a PR ($c)"; exit 1;; esac; done
 
