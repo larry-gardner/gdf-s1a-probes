@@ -259,6 +259,7 @@ jobs:
       - name: R13 verify, in a new step process
         run: |
           if sudo -n true 2> "$RUNNER_TEMP/r13-sudo.err"; then echo "::error::sudo still works"; exit 1; fi
+          if sudo -n -l > /dev/null 2>&1; then echo "::error::sudo -l still lists commands"; exit 1; fi
           sudo_err="$(head -c 300 "$RUNNER_TEMP/r13-sudo.err")"
           echo "sudo_refusal=$sudo_err"
           [ "$(stat -c '%u %A' /usr/bin/sudo)" = "0 -rwsr-xr-x" ] || { echo "::error::sudo is not setuid root, so its failure proves nothing"; exit 1; }
